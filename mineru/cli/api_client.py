@@ -456,12 +456,20 @@ class SubmitResponse:
     result_url: str
     file_names: tuple[str, ...] = ()
     queued_ahead: int | None = None
+    progress_percent: int | None = None
+    progress_stage: str | None = None
+    progress_message: str | None = None
+    progress_detail: dict | None = None
 
 
 @dataclass(frozen=True)
 class TaskStatusSnapshot:
     status: str
     queued_ahead: int | None = None
+    progress_percent: int | None = None
+    progress_stage: str | None = None
+    progress_message: str | None = None
+    progress_detail: dict | None = None
 
 
 class LocalAPIServer:
@@ -911,6 +919,10 @@ def submit_parse_task_sync(
     result_url = payload.get("result_url")
     file_names = payload.get("file_names")
     queued_ahead = payload.get("queued_ahead")
+    progress_percent = payload.get("progress_percent")
+    progress_stage = payload.get("progress_stage")
+    progress_message = payload.get("progress_message")
+    progress_detail = payload.get("progress_detail")
     if (
         not isinstance(task_id, str)
         or not isinstance(status_url, str)
@@ -923,6 +935,14 @@ def submit_parse_task_sync(
         normalized_file_names = tuple(file_names)
     if not isinstance(queued_ahead, int):
         queued_ahead = None
+    if not isinstance(progress_percent, int):
+        progress_percent = None
+    if not isinstance(progress_stage, str):
+        progress_stage = None
+    if not isinstance(progress_message, str):
+        progress_message = None
+    if not isinstance(progress_detail, dict):
+        progress_detail = None
 
     return SubmitResponse(
         task_id=task_id,
@@ -930,6 +950,10 @@ def submit_parse_task_sync(
         result_url=result_url,
         file_names=normalized_file_names,
         queued_ahead=queued_ahead,
+        progress_percent=progress_percent,
+        progress_stage=progress_stage,
+        progress_message=progress_message,
+        progress_detail=progress_detail,
     )
 
 
@@ -965,13 +989,29 @@ async def wait_for_task_result(
         status = payload.get("status")
         if status in {"pending", "processing"}:
             queued_ahead = payload.get("queued_ahead")
+            progress_percent = payload.get("progress_percent")
+            progress_stage = payload.get("progress_stage")
+            progress_message = payload.get("progress_message")
+            progress_detail = payload.get("progress_detail")
             if not isinstance(queued_ahead, int):
                 queued_ahead = None
+            if not isinstance(progress_percent, int):
+                progress_percent = None
+            if not isinstance(progress_stage, str):
+                progress_stage = None
+            if not isinstance(progress_message, str):
+                progress_message = None
+            if not isinstance(progress_detail, dict):
+                progress_detail = None
             if status_snapshot_callback is not None:
                 status_snapshot_callback(
                     TaskStatusSnapshot(
                         status=status,
                         queued_ahead=queued_ahead,
+                        progress_percent=progress_percent,
+                        progress_stage=progress_stage,
+                        progress_message=progress_message,
+                        progress_detail=progress_detail,
                     )
                 )
             if status_callback is not None:

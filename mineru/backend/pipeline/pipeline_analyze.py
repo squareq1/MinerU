@@ -1,7 +1,7 @@
 # Copyright (c) Opendatalab. All rights reserved.
 import os
 import time
-from typing import List, Tuple
+from typing import Any, Callable, List, Tuple
 
 import pypdfium2 as pdfium
 from PIL import Image
@@ -163,11 +163,30 @@ def doc_analyze_streaming(
         formula_enable=True,
         table_enable=True,
         client_side_output_generation=False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ):
     if not (len(pdf_bytes_list) == len(image_writer_list) == len(lang_list)):
         raise ValueError("pdf_bytes_list, image_writer_list, and lang_list must have the same length")
 
     doc_contexts = []
+
+    def emit_progress(
+        progress_percent: int,
+        progress_stage: str,
+        progress_message: str,
+        progress_detail: dict[str, Any] | None = None,
+    ) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "progress_percent": progress_percent,
+                "progress_stage": progress_stage,
+                "progress_message": progress_message,
+                "progress_detail": progress_detail,
+            }
+        )
+
     try:
         total_pages = 0
         for doc_index, (pdf_bytes, image_writer, lang) in enumerate(
@@ -197,6 +216,12 @@ def doc_analyze_streaming(
             doc_contexts.append(context)
 
         if total_pages == 0:
+            emit_progress(
+                85,
+                "postprocessing",
+                "Finalizing empty pipeline task",
+                {"processed_pages": 0, "total_pages": 0},
+            )
             _emit_zero_page_contexts(
                 doc_contexts,
                 on_doc_ready,
@@ -217,6 +242,54 @@ def doc_analyze_streaming(
             client_side_output_generation=client_side_output_generation,
         )
         processed_pages = 0
+        emit_progress(
+            5,
+            "analyzing",
+            "Starting pipeline analysis",
+            {"processed_pages": processed_pages, "total_pages": total_pages},
+        )
+
+        def on_page_processed(page_update: dict[str, Any]) -> None:
+            current_processed_pages = int(page_update.get("processed_pages", 0))
+            analyze_percent = 85
+            if total_pages > 0:
+                analyze_percent = 5 + int((current_processed_pages / total_pages) * 80)
+            emit_progress(
+                min(85, analyze_percent),
+                "analyzing",
+                "Analyzing pipeline pages",
+                {
+                    "processed_pages": current_processed_pages,
+                    "total_pages": total_pages,
+                },
+            )
+
+        batch_page_total = 0
+
+        def on_batch_progress(batch_update: dict[str, Any]) -> None:
+            stage_name = str(batch_update.get("progress_stage", "analyzing"))
+            stage_message = str(
+                batch_update.get("progress_message", "Analyzing pipeline pages")
+            )
+            batch_progress = float(batch_update.get("batch_progress", 0.0))
+            current_processed_pages = float(processed_pages)
+            if batch_page_total > 0:
+                current_processed_pages += batch_progress * batch_page_total
+            analyze_percent = 85
+            if total_pages > 0:
+                analyze_percent = 5 + int((current_processed_pages / total_pages) * 80)
+            emit_progress(
+                min(85, analyze_percent),
+                stage_name,
+                stage_message,
+                {
+                    "processed_pages": int(current_processed_pages),
+                    "total_pages": total_pages,
+                    "batch_progress": round(batch_progress, 4),
+                    "batch_pages": batch_page_total,
+                },
+            )
+
         infer_start = time.time()
         progress_bar = None
         last_append_end_time = None
@@ -266,12 +339,14 @@ def doc_analyze_streaming(
                     f'{processed_pages + len(batch_images)}/{total_pages} pages, '
                     f'batch_pages={len(batch_images)}, doc_slices={_format_doc_slices(batch_slices)}'
                 )
+                batch_page_total = len(batch_images)
 
                 try:
                     batch_results = batch_image_analyze(
                         batch_images,
                         formula_enable=formula_enable,
                         table_enable=table_enable,
+                        progress_callback=on_batch_progress,
                     )
                     if progress_bar is None:
                         progress_bar = tqdm(total=total_pages, desc="Processing pages")
@@ -295,6 +370,7 @@ def doc_analyze_streaming(
                             ocr_enable=context['ocr_enable'],
                             model_list=context['model_list'],
                             progress_bar=progress_bar,
+                            page_progress_callback=on_page_processed,
                         )
                         result_offset += take_count
 
@@ -331,7 +407,8 @@ def doc_analyze_streaming(
 def batch_image_analyze(
         images_with_extra_info: List[Tuple[Image.Image, bool, str]],
         formula_enable=True,
-        table_enable=True):
+        table_enable=True,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None):
 
     from .batch_analyze import BatchAnalyze
 
@@ -383,7 +460,7 @@ def batch_image_analyze(
         table_enable,
         enable_ocr_det_batch,
     )
-    results = batch_model(images_with_extra_info)
+    results = batch_model(images_with_extra_info, progress_callback=progress_callback)
 
     clean_memory(get_device())
 
