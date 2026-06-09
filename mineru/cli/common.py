@@ -6,7 +6,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Callable, Sequence
 
 from loguru import logger
 
@@ -365,6 +365,7 @@ def _process_pipeline(
         f_dump_content_list,
         f_make_md_mode,
         client_side_output_generation=False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ):
     """处理pipeline后端逻辑"""
     from mineru.backend.pipeline.pipeline_analyze import doc_analyze_streaming as pipeline_doc_analyze_streaming
@@ -382,12 +383,35 @@ def _process_pipeline(
 
     output_futures = []
 
+    def emit_progress(
+        progress_percent: int,
+        progress_stage: str,
+        progress_message: str,
+        progress_detail: dict[str, Any] | None = None,
+    ) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "progress_percent": progress_percent,
+                "progress_stage": progress_stage,
+                "progress_message": progress_message,
+                "progress_detail": progress_detail,
+            }
+        )
+
     def run_output_task(doc_index, middle_json, model_list):
         pdf_file_name, local_image_dir, local_md_dir = local_output_info[doc_index]
         md_writer = md_writer_list[doc_index]
         pdf_bytes = pdf_bytes_list[doc_index]
         logger.debug(f"Pipeline output start: doc{doc_index}")
         try:
+            emit_progress(
+                96,
+                "writing_output",
+                "Writing pipeline outputs",
+                {"current_document": doc_index + 1, "total_documents": len(pdf_file_names)},
+            )
             _process_output(
                 middle_json["pdf_info"], pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
                 md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_pdf,
@@ -404,6 +428,12 @@ def _process_pipeline(
             logger.debug(
                 f"Pipeline doc ready: doc{doc_index} pages={len(middle_json['pdf_info'])} output_submitted=1"
             )
+            emit_progress(
+                90,
+                "postprocessing",
+                "Finalizing pipeline document",
+                {"current_document": doc_index + 1, "total_documents": len(pdf_file_names)},
+            )
             future = output_executor.submit(run_output_task, doc_index, middle_json, model_list)
             output_futures.append(future)
 
@@ -416,6 +446,7 @@ def _process_pipeline(
             formula_enable=p_formula_enable,
             table_enable=p_table_enable,
             client_side_output_generation=client_side_output_generation,
+            progress_callback=progress_callback,
         )
 
         for future in output_futures:
@@ -688,6 +719,7 @@ def do_parse(
         image_analysis=True,
         client_side_output_generation=False,
         effort=DEFAULT_HYBRID_EFFORT,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
         **kwargs,
 ):
     backend = normalize_backend(backend)
@@ -720,6 +752,7 @@ def do_parse(
             f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
             f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
             client_side_output_generation=client_side_output_generation,
+            progress_callback=progress_callback,
         )
     else:
         if backend.startswith("vlm-"):
@@ -780,6 +813,7 @@ async def aio_do_parse(
         image_analysis=True,
         client_side_output_generation=False,
         effort=DEFAULT_HYBRID_EFFORT,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
         **kwargs,
 ):
     backend = normalize_backend(backend)
@@ -815,6 +849,7 @@ async def aio_do_parse(
             f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
             f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
             client_side_output_generation=client_side_output_generation,
+            progress_callback=progress_callback,
         )
     else:
         if backend.startswith("vlm-"):
