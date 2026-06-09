@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Callable, Optional
 
 import click
 import uvicorn
@@ -169,6 +169,10 @@ class AsyncParseTask:
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     error: Optional[str] = None
+    progress_percent: int = 0
+    progress_stage: str = "pending"
+    progress_message: str = "Task is pending"
+    progress_detail: dict[str, Any] | None = None
 
     def to_status_payload(
         self,
@@ -184,6 +188,9 @@ class AsyncParseTask:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "error": self.error,
+            "progress_percent": self.progress_percent,
+            "progress_stage": self.progress_stage,
+            "progress_message": self.progress_message,
             "status_url": str(
                 request.url_for("get_async_task_status", task_id=self.task_id)
             ),
@@ -191,6 +198,8 @@ class AsyncParseTask:
                 request.url_for("get_async_task_result", task_id=self.task_id)
             ),
         }
+        if self.progress_detail is not None:
+            payload["progress_detail"] = self.progress_detail
         if queued_ahead is not None:
             payload["queued_ahead"] = queued_ahead
         return payload
@@ -824,6 +833,7 @@ async def run_parse_job(
     uploads: list[StoredUpload],
     request_options: ParseRequestOptions | AsyncParseTask,
     config: dict[str, Any],
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[str]:
     pdf_file_names, pdf_bytes_list = await asyncio.to_thread(load_parse_inputs, uploads)
     actual_lang_list = normalize_lang_list(request_options.lang_list, len(pdf_file_names))
@@ -857,6 +867,7 @@ async def run_parse_job(
             "client_side_output_generation",
             False,
         ),
+        progress_callback=progress_callback,
         **config,
     )
 
@@ -1013,6 +1024,23 @@ class AsyncTaskManager:
             queued_ahead=self.get_queued_ahead(task.task_id),
         )
 
+    @staticmethod
+    def update_task_progress(
+        task: AsyncParseTask,
+        *,
+        progress_percent: int | None = None,
+        progress_stage: str | None = None,
+        progress_message: str | None = None,
+        progress_detail: dict[str, Any] | None = None,
+    ) -> None:
+        if progress_percent is not None:
+            task.progress_percent = max(0, min(100, int(progress_percent)))
+        if progress_stage is not None:
+            task.progress_stage = progress_stage
+        if progress_message is not None:
+            task.progress_message = progress_message
+        task.progress_detail = progress_detail
+
     async def wait_for_terminal_state(self, task_id: str) -> AsyncParseTask:
         task = self.tasks.get(task_id)
         if task is None:
@@ -1150,6 +1178,12 @@ class AsyncTaskManager:
             task.status = TASK_FAILED
             task.error = str(exc)
             task.completed_at = utc_now_iso()
+            self.update_task_progress(
+                task,
+                progress_stage="failed",
+                progress_message="Task execution failed",
+                progress_detail=task.progress_detail,
+            )
             self._signal_task_event(task_id)
             logger.exception(f"Async task failed: {task_id}")
 
@@ -1157,6 +1191,18 @@ class AsyncTaskManager:
         task.status = TASK_PROCESSING
         task.started_at = utc_now_iso()
         task.error = None
+        initial_progress_message = (
+            "Preparing pipeline task"
+            if task.backend == "pipeline"
+            else "Preparing task"
+        )
+        self.update_task_progress(
+            task,
+            progress_percent=1,
+            progress_stage="preparing",
+            progress_message=initial_progress_message,
+            progress_detail=None,
+        )
 
         uploads = [
             StoredUpload(
@@ -1171,14 +1217,32 @@ class AsyncTaskManager:
             )
         ]
         config = getattr(self.app.state, "config", {})
+
+        def progress_callback(progress_update: dict[str, Any]) -> None:
+            self.update_task_progress(
+                task,
+                progress_percent=progress_update.get("progress_percent"),
+                progress_stage=progress_update.get("progress_stage"),
+                progress_message=progress_update.get("progress_message"),
+                progress_detail=progress_update.get("progress_detail"),
+            )
+
         await run_parse_job(
             output_dir=task.output_dir,
             uploads=uploads,
             request_options=task,
             config=config,
+            progress_callback=progress_callback,
         )
         task.status = TASK_COMPLETED
         task.completed_at = utc_now_iso()
+        self.update_task_progress(
+            task,
+            progress_percent=100,
+            progress_stage="completed",
+            progress_message="Task completed",
+            progress_detail=task.progress_detail,
+        )
         self._signal_task_event(task.task_id)
 
     def cleanup_expired_tasks(self) -> int:

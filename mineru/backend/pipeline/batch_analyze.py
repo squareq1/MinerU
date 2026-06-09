@@ -315,6 +315,58 @@ class BatchAnalyze:
                 return match.expand(replacement)
         return text
 
+    def _build_stage_weights(self) -> list[tuple[str, float]]:
+        stage_weights: list[tuple[str, float]] = [("layout_predict", 0.18)]
+        if self.formula_enable:
+            stage_weights.append(("formula_recognition", 0.10))
+        if self.table_enable:
+            stage_weights.extend(
+                [
+                    ("table_ocr_det", 0.18),
+                    ("table_ocr_rec", 0.12),
+                    ("table_structure", 0.18),
+                ]
+            )
+        stage_weights.extend(
+            [
+                ("ocr_det", 0.16),
+                ("ocr_rec", 0.06),
+                ("seal_predict", 0.02),
+            ]
+        )
+        return stage_weights
+
+    def _build_progress_emitter(self, progress_callback):
+        if progress_callback is None:
+            return lambda *args, **kwargs: None
+
+        stage_weights = self._build_stage_weights()
+        total_weight = sum(weight for _, weight in stage_weights) or 1.0
+        cumulative_weight = 0.0
+        stage_offsets: dict[str, tuple[float, float]] = {}
+        for stage_name, weight in stage_weights:
+            stage_offsets[stage_name] = (cumulative_weight, weight)
+            cumulative_weight += weight
+
+        def emit(stage_name: str, current: int, total: int, message: str) -> None:
+            offset, weight = stage_offsets[stage_name]
+            if total <= 0:
+                stage_fraction = 1.0
+            else:
+                stage_fraction = max(0.0, min(1.0, current / total))
+            batch_progress = (offset + weight * stage_fraction) / total_weight
+            progress_callback(
+                {
+                    "progress_stage": stage_name,
+                    "progress_message": message,
+                    "batch_progress": batch_progress,
+                    "stage_current": current,
+                    "stage_total": total,
+                }
+            )
+
+        return emit
+
     @classmethod
     def _extract_table_inline_objects(
         cls,
@@ -405,11 +457,12 @@ class BatchAnalyze:
         return table_inline_objects
 
 
-    def __call__(self, images_with_extra_info: list) -> list:
+    def __call__(self, images_with_extra_info: list, progress_callback=None) -> list:
         if len(images_with_extra_info) == 0:
             return []
 
         images_layout_res = []
+        emit_progress = self._build_progress_emitter(progress_callback)
 
         self.model = self.model_manager.get_model(
             lang=None,
@@ -423,10 +476,22 @@ class BatchAnalyze:
         np_images = [np.asarray(image) for image, _, _ in images_with_extra_info]
 
         # pp-doclayout_v2
+        emit_progress(
+            "layout_predict",
+            0,
+            len(pil_images),
+            "Running layout prediction",
+        )
         images_layout_res += run_layout_inference(
             self.model.layout_model.batch_predict,
             pil_images,
             batch_size=min(8, self.batch_ratio * LAYOUT_BASE_BATCH_SIZE),
+        )
+        emit_progress(
+            "layout_predict",
+            len(pil_images),
+            len(pil_images),
+            "Layout prediction complete",
         )
         # 清理显存
         clean_vram(self.model.device, vram_threshold=8)
@@ -442,6 +507,13 @@ class BatchAnalyze:
                 images_mfd_res.append(page_formula_res)
 
             # 公式识别
+            formula_total = sum(len(page_formula_res) for page_formula_res in images_mfd_res)
+            emit_progress(
+                "formula_recognition",
+                0,
+                formula_total,
+                "Running formula recognition",
+            )
             images_formula_list = run_mfr_inference(
                 self.model.mfr_model.batch_predict,
                 images_mfd_res,
@@ -455,6 +527,12 @@ class BatchAnalyze:
                     images_mfd_res[image_index], images_formula_list[image_index]
                 ):
                     formula_res["latex"] = formula_with_latex.get("latex", "")
+            emit_progress(
+                "formula_recognition",
+                formula_total,
+                formula_total,
+                "Formula recognition complete",
+            )
 
             # 清理显存
             clean_vram(self.model.device, vram_threshold=8)
@@ -566,6 +644,14 @@ class BatchAnalyze:
                 enable_merge_det_boxes=False,
             )
             table_det_items = self._build_table_ocr_det_items(table_res_list_all_page)
+            total_table_det_items = len(table_det_items)
+            emit_progress(
+                "table_ocr_det",
+                0,
+                total_table_det_items,
+                "Detecting table text regions",
+            )
+            completed_table_ocr_det = 0
             if self.table_ocr_det_batch_enabled:
                 det_images = [table_det_item["det_image"] for table_det_item in table_det_items]
                 if det_images:
@@ -588,6 +674,13 @@ class BatchAnalyze:
                             dt_boxes,
                             rec_img_lang_group,
                         )
+                        completed_table_ocr_det += 1
+                        emit_progress(
+                            "table_ocr_det",
+                            completed_table_ocr_det,
+                            total_table_det_items,
+                            "Detecting table text regions",
+                        )
             else:
                 for table_det_item in tqdm(table_det_items, desc="Table-ocr det"):
                     ocr_result = run_ocr_inference(
@@ -600,8 +693,23 @@ class BatchAnalyze:
                         ocr_result,
                         rec_img_lang_group,
                     )
+                    completed_table_ocr_det += 1
+                    emit_progress(
+                        "table_ocr_det",
+                        completed_table_ocr_det,
+                        total_table_det_items,
+                        "Detecting table text regions",
+                    )
 
             # OCR rec，按照语言分批处理
+            total_table_rec_items = sum(len(rec_img_list) for rec_img_list in rec_img_lang_group.values())
+            completed_table_rec_items = 0
+            emit_progress(
+                "table_ocr_rec",
+                completed_table_rec_items,
+                total_table_rec_items,
+                "Recognizing table text",
+            )
             for _lang, rec_img_list in rec_img_lang_group.items():
                 if not rec_img_list:
                     continue
@@ -632,6 +740,13 @@ class BatchAnalyze:
                         table_res_list_all_page[img_dict["table_id"]]["ocr_result"] = [
                             ocr_result_item
                         ]
+                completed_table_rec_items += len(rec_img_list)
+                emit_progress(
+                    "table_ocr_rec",
+                    completed_table_rec_items,
+                    total_table_rec_items,
+                    "Recognizing table text",
+                )
 
             # 先对所有表格使用无线表格模型，然后对分类为有线的表格使用有线表格模型
             for table_res_dict in table_res_list_all_page:
@@ -657,6 +772,12 @@ class BatchAnalyze:
             wireless_table_model = atom_model_manager.get_atom_model(
                 atom_model_name=AtomicModel.WirelessTable,
             )
+            emit_progress(
+                "table_structure",
+                0,
+                len(table_res_list_all_page),
+                "Building table structure",
+            )
             wireless_table_model.batch_predict(table_res_list_all_page)
 
             # 单独拿出有线表格进行预测
@@ -670,11 +791,25 @@ class BatchAnalyze:
                     wired_table_res_list.append(table_res_dict)
                 del table_res_dict["table_res"]["cls_label"]
                 del table_res_dict["table_res"]["cls_score"]
+            completed_table_structure = len(table_res_list_all_page) - len(wired_table_res_list)
+            emit_progress(
+                "table_structure",
+                completed_table_structure,
+                len(table_res_list_all_page),
+                "Building table structure",
+            )
             if wired_table_res_list:
                 for table_res_dict in tqdm(
                         wired_table_res_list, desc="Table-wired Predict"
                 ):
                     if not table_res_dict.get("ocr_result", None):
+                        completed_table_structure += 1
+                        emit_progress(
+                            "table_structure",
+                            completed_table_structure,
+                            len(table_res_list_all_page),
+                            "Building table structure",
+                        )
                         continue
 
                     wired_table_model = atom_model_manager.get_atom_model(
@@ -685,6 +820,13 @@ class BatchAnalyze:
                         table_res_dict["wired_table_img"],
                         table_res_dict["ocr_result"],
                         table_res_dict["table_res"].get("html", None)
+                    )
+                    completed_table_structure += 1
+                    emit_progress(
+                        "table_structure",
+                        completed_table_structure,
+                        len(table_res_list_all_page),
+                        "Building table structure",
                     )
 
             # 表格格式清理
@@ -750,6 +892,13 @@ class BatchAnalyze:
                     atom_model_name=AtomicModel.OCR,
                     lang=lang
                 )
+                emit_progress(
+                    "ocr_det",
+                    0,
+                    len(lang_crop_list),
+                    f"Detecting OCR regions ({lang})",
+                )
+                completed_ocr_det_items = 0
 
                 batch_images = [crop_info[1] for crop_info in lang_crop_list]
                 det_batch_size = min(
@@ -793,6 +942,13 @@ class BatchAnalyze:
                                 _lang,
                             )
                             ocr_res_list_dict['layout_res'].extend(ocr_result_list)
+                        completed_ocr_det_items += 1
+                        emit_progress(
+                            "ocr_det",
+                            completed_ocr_det_items,
+                            len(lang_crop_list),
+                            f"Detecting OCR regions ({lang})",
+                        )
 
             # 清理显存
             clean_vram(self.model.device, vram_threshold=8)
@@ -869,6 +1025,13 @@ class BatchAnalyze:
 
             # Process OCR by language
             total_processed = 0
+            total_ocr_rec_items = sum(len(img_crop_list) for img_crop_list in img_crop_lists_by_lang.values())
+            emit_progress(
+                "ocr_rec",
+                total_processed,
+                total_ocr_rec_items,
+                "Recognizing OCR text",
+            )
 
             # Process each language separately
             for lang, img_crop_list in img_crop_lists_by_lang.items():
@@ -919,6 +1082,12 @@ class BatchAnalyze:
                             page_layout_res.remove(layout_res_item)
 
                     total_processed += len(img_crop_list)
+                    emit_progress(
+                        "ocr_rec",
+                        total_processed,
+                        total_ocr_rec_items,
+                        "Recognizing OCR text",
+                    )
 
         seal_ocr_items = []
         for ocr_res_list_dict in ocr_res_list_all_page:
@@ -927,7 +1096,13 @@ class BatchAnalyze:
                     seal_ocr_items.append((ocr_res_list_dict, layout_res_item))
 
         seal_ocr_model = None
-        for ocr_res_list_dict, layout_res_item in tqdm(seal_ocr_items, desc="Seal Predict"):
+        emit_progress(
+            "seal_predict",
+            0,
+            len(seal_ocr_items),
+            "Recognizing seals",
+        )
+        for index, (ocr_res_list_dict, layout_res_item) in enumerate(tqdm(seal_ocr_items, desc="Seal Predict")):
             np_img = ocr_res_list_dict['np_img']
             image_h, image_w = np_img.shape[:2]
             layout_res_item["text"] = ""
@@ -968,6 +1143,12 @@ class BatchAnalyze:
                     seal_texts.append(rec_text)
 
             layout_res_item["text"] = seal_texts
+            emit_progress(
+                "seal_predict",
+                index + 1,
+                len(seal_ocr_items),
+                "Recognizing seals",
+            )
 
         for ocr_res_list_dict in ocr_res_list_all_page:
             self._prune_empty_ocr_text_blocks(

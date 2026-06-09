@@ -1,5 +1,6 @@
 # Copyright (c) Opendatalab. All rights reserved.
 import copy
+from typing import Any, Callable
 
 from tqdm import tqdm
 
@@ -78,6 +79,7 @@ def append_page_model_infos_to_middle_json(
     page_start_index=0,
     ocr_enable=False,
     progress_bar=None,
+    page_progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ):
     for offset, (page_model_info, image_dict) in enumerate(zip(page_model_infos, images_list)):
         page_index = page_start_index + offset
@@ -102,6 +104,13 @@ def append_page_model_infos_to_middle_json(
         middle_json["pdf_info"].append(page_info)
         if progress_bar is not None:
             progress_bar.update(1)
+        if page_progress_callback is not None:
+            page_progress_callback(
+                {
+                    "page_index": page_index,
+                    "processed_pages": len(middle_json["pdf_info"]),
+                }
+            )
 
 
 def append_batch_results_to_middle_json(
@@ -114,6 +123,7 @@ def append_batch_results_to_middle_json(
     ocr_enable=False,
     model_list=None,
     progress_bar=None,
+    page_progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ):
     page_model_infos = []
     for offset, (image_dict, page_layout_dets) in enumerate(zip(images_list, batch_results)):
@@ -133,6 +143,7 @@ def append_batch_results_to_middle_json(
         page_start_index=page_start_index,
         ocr_enable=ocr_enable,
         progress_bar=progress_bar,
+        page_progress_callback=page_progress_callback,
     )
 
 

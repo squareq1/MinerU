@@ -143,6 +143,8 @@ class LiveTaskStatusState:
     task_id: str
     status: str
     queued_ahead: int | None = None
+    progress_percent: int | None = None
+    progress_stage: str | None = None
     frame_step: int = 0
 
 
@@ -215,12 +217,18 @@ class LiveTaskStatusRenderer:
                 queued_ahead = (
                     status_update.queued_ahead if status == "pending" else None
                 )
+                progress_percent = status_update.progress_percent
+                progress_stage = status_update.progress_stage
             else:
                 status = status_update
                 queued_ahead = None
+                progress_percent = None
+                progress_stage = None
 
             state.status = status
             state.queued_ahead = queued_ahead
+            state.progress_percent = progress_percent
+            state.progress_stage = progress_stage
             if status in self.ACTIVE_STATUSES:
                 state.frame_step += 1
             self.render_locked()
@@ -274,6 +282,10 @@ class LiveTaskStatusRenderer:
         parts = [f"status={state.status}"]
         if state.status == "pending" and state.queued_ahead is not None:
             parts.append(f"ahead={state.queued_ahead}")
+        if state.progress_stage:
+            parts.append(f"stage={state.progress_stage}")
+        if state.progress_percent is not None:
+            parts.append(f"progress={state.progress_percent}%")
         parts.append(f"task_id={state.task_id}")
         return f"{LiveTaskStatusRenderer._build_bar(state.frame_step)} {' | '.join(parts)}"
 

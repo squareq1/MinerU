@@ -365,6 +365,10 @@ class RouterTaskRecord:
     completed_at: Optional[str] = None
     error: Optional[str] = None
     queued_ahead: int | None = None
+    progress_percent: int | None = None
+    progress_stage: str | None = None
+    progress_message: str | None = None
+    progress_detail: dict[str, Any] | None = None
     upstream_error_count: int = 0
 
     def to_status_payload(self, request: Request) -> dict[str, Any]:
@@ -382,6 +386,14 @@ class RouterTaskRecord:
         }
         if self.queued_ahead is not None:
             payload["queued_ahead"] = self.queued_ahead
+        if self.progress_percent is not None:
+            payload["progress_percent"] = self.progress_percent
+        if self.progress_stage is not None:
+            payload["progress_stage"] = self.progress_stage
+        if self.progress_message is not None:
+            payload["progress_message"] = self.progress_message
+        if self.progress_detail is not None:
+            payload["progress_detail"] = self.progress_detail
         return payload
 
 
@@ -874,6 +886,10 @@ class RouterTaskRegistry:
         completed_at: Optional[str],
         error: Optional[str],
         queued_ahead: int | None,
+        progress_percent: int | None,
+        progress_stage: str | None,
+        progress_message: str | None,
+        progress_detail: dict[str, Any] | None,
     ) -> RouterTaskRecord:
         task = RouterTaskRecord(
             task_id=str(uuid.uuid4()),
@@ -888,6 +904,10 @@ class RouterTaskRegistry:
             completed_at=completed_at,
             error=error,
             queued_ahead=queued_ahead,
+            progress_percent=progress_percent,
+            progress_stage=progress_stage,
+            progress_message=progress_message,
+            progress_detail=progress_detail,
         )
         async with self._lock:
             self._tasks[task.task_id] = task
@@ -917,6 +937,14 @@ class RouterTaskRegistry:
             task.error = payload.get("error") if payload.get("error") is None else str(payload.get("error"))
             queued_ahead = payload.get("queued_ahead")
             task.queued_ahead = queued_ahead if isinstance(queued_ahead, int) else None
+            progress_percent = payload.get("progress_percent")
+            task.progress_percent = progress_percent if isinstance(progress_percent, int) else None
+            progress_stage = payload.get("progress_stage")
+            task.progress_stage = progress_stage if isinstance(progress_stage, str) else None
+            progress_message = payload.get("progress_message")
+            task.progress_message = progress_message if isinstance(progress_message, str) else None
+            progress_detail = payload.get("progress_detail")
+            task.progress_detail = progress_detail if isinstance(progress_detail, dict) else None
             task.upstream_error_count = 0
             return task
 
@@ -1113,6 +1141,10 @@ def parse_submit_response(payload: Any) -> dict[str, Any]:
         "completed_at": payload.get("completed_at"),
         "error": payload.get("error"),
         "queued_ahead": payload.get("queued_ahead") if isinstance(payload.get("queued_ahead"), int) else None,
+        "progress_percent": payload.get("progress_percent") if isinstance(payload.get("progress_percent"), int) else None,
+        "progress_stage": payload.get("progress_stage") if isinstance(payload.get("progress_stage"), str) else None,
+        "progress_message": payload.get("progress_message") if isinstance(payload.get("progress_message"), str) else None,
+        "progress_detail": payload.get("progress_detail") if isinstance(payload.get("progress_detail"), dict) else None,
     }
 
 
@@ -1218,6 +1250,10 @@ async def submit_router_task(
                 completed_at=upstream_payload["completed_at"] if isinstance(upstream_payload["completed_at"], str) else None,
                 error=upstream_payload["error"] if isinstance(upstream_payload["error"], str) else None,
                 queued_ahead=upstream_payload["queued_ahead"],
+                progress_percent=upstream_payload["progress_percent"],
+                progress_stage=upstream_payload["progress_stage"],
+                progress_message=upstream_payload["progress_message"],
+                progress_detail=upstream_payload["progress_detail"],
             )
         except UpstreamSubmissionRejected as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
